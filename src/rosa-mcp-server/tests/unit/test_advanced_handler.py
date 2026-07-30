@@ -312,3 +312,79 @@ class TestRosaListMachineTypes:
         path = call_args[0][1]
         assert 'machine_types' in path
         assert 'search=' in path
+
+
+
+class TestClusterOpsDispatch:
+    """Test rosa_cluster_ops dispatches to correct methods."""
+
+    @pytest.mark.asyncio
+    async def test_status_op(self, mock_mcp, mock_ocm_client, mock_context):
+        from awslabs.rosa_mcp_server.rosa_advanced_handler import RosaAdvancedHandler
+        mock_ocm_client.get_cluster = AsyncMock(return_value={'status': {'state': 'ready'}})
+        handler = RosaAdvancedHandler(mock_mcp, mock_ocm_client, allow_write=True)
+        result = await handler.rosa_cluster_ops(mock_context, 'c1', 'status')
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_list_break_glass_op(self, mock_mcp, mock_ocm_client, mock_context):
+        from awslabs.rosa_mcp_server.rosa_advanced_handler import RosaAdvancedHandler
+        mock_ocm_client.list_break_glass_credentials = AsyncMock(return_value={'items': []})
+        handler = RosaAdvancedHandler(mock_mcp, mock_ocm_client, allow_write=True)
+        result = await handler.rosa_cluster_ops(mock_context, 'c1', 'list_break_glass')
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_get_delete_protection_op(self, mock_mcp, mock_ocm_client, mock_context):
+        from awslabs.rosa_mcp_server.rosa_advanced_handler import RosaAdvancedHandler
+        mock_ocm_client.get_delete_protection = AsyncMock(return_value={'enabled': False})
+        handler = RosaAdvancedHandler(mock_mcp, mock_ocm_client, allow_write=True)
+        result = await handler.rosa_cluster_ops(mock_context, 'c1', 'get_delete_protection')
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_list_machine_types_op(self, mock_mcp, mock_ocm_client, mock_context):
+        from awslabs.rosa_mcp_server.rosa_advanced_handler import RosaAdvancedHandler
+        mock_ocm_client.list_machine_types = AsyncMock(return_value={'items': []})
+        handler = RosaAdvancedHandler(mock_mcp, mock_ocm_client, allow_write=True)
+        result = await handler.rosa_cluster_ops(mock_context, 'c1', 'list_machine_types')
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_hibernate_op(self, mock_mcp, mock_ocm_client, mock_context):
+        from awslabs.rosa_mcp_server.rosa_advanced_handler import RosaAdvancedHandler
+        mock_ocm_client.update_cluster = AsyncMock(return_value={'status': {'state': 'hibernating'}})
+        handler = RosaAdvancedHandler(mock_mcp, mock_ocm_client, allow_write=True)
+        result = await handler.rosa_cluster_ops(mock_context, 'c1', 'hibernate')
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_resume_op(self, mock_mcp, mock_ocm_client, mock_context):
+        from awslabs.rosa_mcp_server.rosa_advanced_handler import RosaAdvancedHandler
+        mock_ocm_client.update_cluster = AsyncMock(return_value={'status': {'state': 'ready'}})
+        handler = RosaAdvancedHandler(mock_mcp, mock_ocm_client, allow_write=True)
+        result = await handler.rosa_cluster_ops(mock_context, 'c1', 'resume')
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_create_break_glass_op(self, mock_mcp, mock_ocm_client, mock_context):
+        from awslabs.rosa_mcp_server.rosa_advanced_handler import RosaAdvancedHandler
+        mock_ocm_client.create_break_glass_credential = AsyncMock(return_value={'id': 'bg1'})
+        handler = RosaAdvancedHandler(mock_mcp, mock_ocm_client, allow_write=True)
+        result = await handler.rosa_cluster_ops(mock_context, 'c1', 'create_break_glass', ttl='24h')
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_set_delete_protection_op(self, mock_mcp, mock_ocm_client, mock_context):
+        from awslabs.rosa_mcp_server.rosa_advanced_handler import RosaAdvancedHandler
+        mock_ocm_client.update_delete_protection = AsyncMock(return_value={'enabled': True})
+        handler = RosaAdvancedHandler(mock_mcp, mock_ocm_client, allow_write=True)
+        result = await handler.rosa_cluster_ops(mock_context, 'c1', 'set_delete_protection', enabled=True)
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_invalid_op_raises(self, mock_mcp, mock_ocm_client, mock_context):
+        from awslabs.rosa_mcp_server.rosa_advanced_handler import RosaAdvancedHandler
+        handler = RosaAdvancedHandler(mock_mcp, mock_ocm_client, allow_write=True)
+        with pytest.raises(ValueError, match='Invalid operation'):
+            await handler.rosa_cluster_ops(mock_context, 'c1', 'nonexistent')

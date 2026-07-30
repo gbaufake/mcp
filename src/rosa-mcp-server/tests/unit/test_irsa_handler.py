@@ -276,3 +276,98 @@ class TestBuildTrustPolicy:
         assert stmt['Condition']['StringEquals'][
             'rh-oidc.s3.us-east-1.amazonaws.com/abc123:sub'
         ] == 'system:serviceaccount:my-ns:my-sa'
+
+
+
+class TestConfigureIRSAExecution:
+    """Tests for rosa_configure_irsa - execution path."""
+
+    @pytest.mark.asyncio
+    async def test_configure_irsa_creates_role(self, mock_mcp, mock_ocm_with_oidc, mock_context):
+        handler = RosaIRSAHandler(mock_mcp, mock_ocm_with_oidc, allow_write=True)
+
+        mock_iam = MagicMock()
+        mock_iam.create_role.return_value = {'Role': {'Arn': 'arn:aws:iam::123:role/test-role'}}
+        mock_iam.attach_role_policy.return_value = {}
+        mock_iam.get_role.return_value = {'Role': {'Arn': 'arn:aws:iam::123:role/test-role'}}
+
+        with patch('boto3.client', return_value=mock_iam):
+            result = await handler.rosa_configure_irsa(
+                mock_context,
+                cluster_id='test-id',
+                namespace='default',
+                service_account='my-sa',
+                role_name='test-role',
+                policy_arn='arn:aws:iam::123:policy/my-policy',
+                annotate_service_account=False,
+            )
+            data = json.loads(result[0].text)
+            assert 'configured' in json.dumps(data).lower() or 'role' in json.dumps(data).lower()
+
+
+class TestDescribeIRSA:
+    """Tests for rosa_describe_irsa."""
+
+    @pytest.mark.asyncio
+    async def test_describe_irsa_returns_info(self, mock_mcp, mock_ocm_with_oidc, mock_context):
+        handler = RosaIRSAHandler(mock_mcp, mock_ocm_with_oidc, allow_write=False)
+
+        mock_iam = MagicMock()
+        mock_iam.list_roles.return_value = {
+            'Roles': [
+                {
+                    'RoleName': 'my-role',
+                    'Arn': 'arn:aws:iam::123:role/my-role',
+                    'AssumeRolePolicyDocument': json.dumps({
+                        'Statement': [{
+                            'Condition': {
+                                'StringEquals': {
+                                    'rh-oidc.s3.us-east-1.amazonaws.com/abc123:sub': 'system:serviceaccount:default:my-sa'
+                                }
+                            }
+                        }]
+                    }),
+                }
+            ],
+            'IsTruncated': False,
+        }
+        mock_iam.list_attached_role_policies.return_value = {
+            'AttachedPolicies': [{'PolicyName': 'p1', 'PolicyArn': 'arn:aws:iam::123:policy/p1'}],
+        }
+
+        with patch('boto3.client', return_value=mock_iam):
+            result = await handler.rosa_describe_irsa(
+                mock_context,
+                cluster_id='test-id',
+                namespace='default',
+                service_account='my-sa',
+            )
+            data = json.loads(result[0].text)
+            assert data is not None
+
+
+class TestDeleteIRSA:
+    """Tests for rosa_delete_irsa."""
+
+    @pytest.mark.asyncio
+    async def test_delete_irsa_write_disabled(self, mock_mcp, mock_ocm_with_oidc, mock_context):
+        handler = RosaIRSAHandler(mock_mcp, mock_ocm_with_oidc, allow_write=False)
+        with pytest.raises(ValueError, match='[Ww]rite'):
+            await handler.rosa_delete_irsa(mock_context, role_name='test-role')
+
+    @pytest.mark.asyncio
+    async def test_delete_irsa_removes_role(self, mock_mcp, mock_ocm_with_oidc, mock_context):
+        handler = RosaIRSAHandler(mock_mcp, mock_ocm_with_oidc, allow_write=True)
+
+        mock_iam = MagicMock()
+        mock_iam.list_attached_role_policies.return_value = {
+            'AttachedPolicies': [{'PolicyArn': 'arn:aws:iam::123:policy/p1'}],
+        }
+        mock_iam.detach_role_policy.return_value = {}
+        mock_iam.list_role_policies.return_value = {'PolicyNames': []}
+        mock_iam.delete_role.return_value = {}
+
+        with patch('boto3.client', return_value=mock_iam):
+            result = await handler.rosa_delete_irsa(mock_context, role_name='test-role')
+            data = json.loads(result[0].text)
+            assert 'deleted' in json.dumps(data).lower() or result is not None

@@ -19,11 +19,9 @@ performs operations via the kubernetes client library.
 """
 
 import json
-import tempfile
 import yaml
 from awslabs.rosa_mcp_server.ocm_client import OCMClient
 from kubernetes import client as k8s_client
-from kubernetes import config as k8s_config
 from kubernetes import dynamic
 from mcp.server.fastmcp import Context
 from mcp.types import TextContent
@@ -65,30 +63,64 @@ class K8sHandler:
     async def _get_k8s_client(self, cluster_id: str) -> k8s_client.ApiClient:
         """Get a configured kubernetes API client for the given cluster.
 
-        Fetches the kubeconfig from OCM and creates an API client.
-
-        Args:
-            cluster_id: The OCM cluster ID.
-
-        Returns:
-            Configured kubernetes ApiClient.
+        Auth: SA token from ~/.rosa-mcp/<cluster-name>.token (HCP-native).
         """
-        creds = await self.ocm.get_cluster_credentials(cluster_id)
-        kubeconfig_data = creds.get('kubeconfig', '')
+        import pathlib
 
-        if not kubeconfig_data:
+        token_dir = pathlib.Path.home() / '.rosa-mcp'
+        cluster_name = None
+        api_url = None
+
+        # Try resolving cluster name from OCM
+        try:
+            cluster_info = await self.ocm.get_cluster(cluster_id)
+            cluster_name = cluster_info.get('name', '')
+            api_url = cluster_info.get('api', {}).get('url', '')
+        except Exception:
+            pass
+
+        if cluster_name:
+            token_file = token_dir / f'{cluster_name}.token'
+            server_file = token_dir / f'{cluster_name}.server'
+        else:
+            # OCM unavailable — try single token fallback
+            token_files = list(token_dir.glob('*.token')) if token_dir.exists() else []
+            if len(token_files) == 1:
+                token_file = token_files[0]
+                cluster_name = token_file.stem
+                server_file = token_dir / f'{cluster_name}.server'
+            elif token_files:
+                names = [f.stem for f in token_files]
+                raise ValueError(
+                    f'OCM unavailable and multiple SA tokens found: {names}. '
+                    'Refresh OCM token (ocm login) or remove unused tokens.'
+                )
+            else:
+                raise ValueError(
+                    f'No SA token found in {token_dir}. '
+                    'Save SA token to ~/.rosa-mcp/<cluster-name>.token'
+                )
+
+        if not token_file.exists():
             raise ValueError(
-                f'No kubeconfig available for cluster {cluster_id}. '
-                'Cluster may still be provisioning or credentials are not accessible.'
+                f'No SA token for cluster "{cluster_name}" at {token_file}. '
+                'Save SA token to that path.'
             )
 
-        # Write kubeconfig to a temp file and load it
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as tmp:
-            tmp.write(kubeconfig_data)
-            tmp_path = tmp.name
+        token = token_file.read_text().strip()
+        server = server_file.read_text().strip() if server_file.exists() else api_url
 
-        api_client = k8s_config.new_client_from_config(config_file=tmp_path)
-        return api_client
+        if not server:
+            raise ValueError(
+                f'No API server URL for cluster "{cluster_name}". '
+                f'Save it to {token_dir / f"{cluster_name}.server"}'
+            )
+
+        configuration = k8s_client.Configuration()
+        configuration.host = server
+        configuration.api_key = {'authorization': f'Bearer {token}'}
+        configuration.verify_ssl = False
+        return k8s_client.ApiClient(configuration)
 
     async def rosa_list_resources(
         self,
@@ -113,7 +145,7 @@ class K8sHandler:
 
         try:
             # Use dynamic client for flexibility with any resource kind
-            from kubernetes.client import AppsV1Api, CoreV1Api, CustomObjectsApi
+            from kubernetes.client import AppsV1Api, CoreV1Api
 
             kwargs = {}
             if label_selector:
@@ -162,28 +194,92 @@ class K8sHandler:
                 else:
                     result = core_v1.list_event_for_all_namespaces(**kwargs)
             else:
-                # Fallback: try using the dynamic/custom objects API
-                CustomObjectsApi(api_client)
-                # For custom resources, caller should use the full group/version
-                # For now, return an informative message
-                return [TextContent(
-                    type='text',
-                    text=json.dumps({
-                        'error': (
-                            f'Resource kind "{kind}" is not directly supported. '
-                            'Supported kinds: Pod, Service, Node, Namespace, Deployment, '
-                            'ConfigMap, Secret, Event. For custom resources, use the '
-                            'OpenShift API directly.'
-                        ),
-                    }),
-                )]
+                # Fallback: use the dynamic client for any resource kind
+                # This handles HPA, Route, DeploymentConfig, NetworkPolicy,
+                # StatefulSet, DaemonSet, Job, CronJob, Ingress, PV, PVC, etc.
+                dyn_client = dynamic.DynamicClient(api_client)
+
+                # Map common kinds to their api_version for convenience
+                kind_api_map = {
+                    'horizontalpodautoscaler': 'autoscaling/v2',
+                    'hpa': 'autoscaling/v2',
+                    'route': 'route.openshift.io/v1',
+                    'deploymentconfig': 'apps.openshift.io/v1',
+                    'statefulset': 'apps/v1',
+                    'daemonset': 'apps/v1',
+                    'replicaset': 'apps/v1',
+                    'job': 'batch/v1',
+                    'cronjob': 'batch/v1',
+                    'ingress': 'networking.k8s.io/v1',
+                    'networkpolicy': 'networking.k8s.io/v1',
+                    'persistentvolume': 'v1',
+                    'pv': 'v1',
+                    'persistentvolumeclaim': 'v1',
+                    'pvc': 'v1',
+                    'serviceaccount': 'v1',
+                    'role': 'rbac.authorization.k8s.io/v1',
+                    'rolebinding': 'rbac.authorization.k8s.io/v1',
+                    'clusterrole': 'rbac.authorization.k8s.io/v1',
+                    'clusterrolebinding': 'rbac.authorization.k8s.io/v1',
+                    'clusteroperator': 'config.openshift.io/v1',
+                    'machineconfig': 'machineconfiguration.openshift.io/v1',
+                    'machineset': 'machine.openshift.io/v1beta1',
+                    'machine': 'machine.openshift.io/v1beta1',
+                }
+
+                # Normalize kind for lookup
+                lookup_key = kind_lower.replace('-', '')
+                api_version = kind_api_map.get(lookup_key)
+
+                # Map shorthand kind names to proper Kind values
+                kind_name_map = {
+                    'hpa': 'HorizontalPodAutoscaler',
+                    'pv': 'PersistentVolume',
+                    'pvc': 'PersistentVolumeClaim',
+                }
+                resolved_kind = kind_name_map.get(lookup_key, kind)
+
+                if not api_version:
+                    # Try discovering via the API
+                    try:
+                        resource_api = dyn_client.resources.get(kind=resolved_kind)
+                        api_version = resource_api.group_version
+                    except Exception:
+                        return [TextContent(
+                            type='text',
+                            text=json.dumps({
+                                'error': (
+                                    f'Could not discover API version for kind "{kind}". '
+                                    'Try using rosa_manage_resource with explicit api_version, '
+                                    'or rosa_list_api_versions to find available APIs.'
+                                ),
+                            }),
+                        )]
+
+                resource_api = dyn_client.resources.get(
+                    api_version=api_version, kind=resolved_kind
+                )
+
+                dyn_kwargs = {}
+                if label_selector:
+                    dyn_kwargs['label_selector'] = label_selector
+                if field_selector:
+                    dyn_kwargs['field_selector'] = field_selector
+
+                if namespace:
+                    dyn_result = resource_api.get(namespace=namespace, **dyn_kwargs)
+                else:
+                    dyn_result = resource_api.get(**dyn_kwargs)
+
+                items = dyn_result.to_dict() if hasattr(dyn_result, 'to_dict') else {}
+                return [TextContent(type='text', text=json.dumps(items, indent=2, default=str))]
 
             # Serialize the response
             data = api_client.sanitize_for_serialization(result)
             return [TextContent(type='text', text=json.dumps(data, indent=2))]
 
         finally:
-            await api_client.close() if hasattr(api_client, 'close') else None
+            api_client.close() if hasattr(api_client, 'close') else None
 
     async def rosa_get_pod_logs(
         self,
@@ -234,7 +330,7 @@ class K8sHandler:
             return [TextContent(type='text', text=logs or '(no logs available)')]
 
         finally:
-            await api_client.close() if hasattr(api_client, 'close') else None
+            api_client.close() if hasattr(api_client, 'close') else None
 
     async def rosa_get_events(
         self,
@@ -278,7 +374,7 @@ class K8sHandler:
             return [TextContent(type='text', text=json.dumps(data, indent=2))]
 
         finally:
-            await api_client.close() if hasattr(api_client, 'close') else None
+            api_client.close() if hasattr(api_client, 'close') else None
 
     async def rosa_apply_yaml(
         self,
@@ -332,7 +428,7 @@ class K8sHandler:
             )]
 
         finally:
-            await api_client.close() if hasattr(api_client, 'close') else None
+            api_client.close() if hasattr(api_client, 'close') else None
 
     async def rosa_get_nodes(
         self,
@@ -361,7 +457,7 @@ class K8sHandler:
             return [TextContent(type='text', text=json.dumps(data, indent=2))]
 
         finally:
-            await api_client.close() if hasattr(api_client, 'close') else None
+            api_client.close() if hasattr(api_client, 'close') else None
 
     async def rosa_manage_resource(
         self,
@@ -433,7 +529,7 @@ class K8sHandler:
             )]
 
         finally:
-            await api_client_instance.close() if hasattr(api_client_instance, 'close') else None
+            api_client_instance.close() if hasattr(api_client_instance, 'close') else None
 
     async def rosa_list_api_versions(
         self,
@@ -479,7 +575,7 @@ class K8sHandler:
             )]
 
         finally:
-            await api_client_instance.close() if hasattr(api_client_instance, 'close') else None
+            api_client_instance.close() if hasattr(api_client_instance, 'close') else None
 
     async def rosa_generate_app_manifest(
         self,

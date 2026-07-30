@@ -128,7 +128,7 @@ class TestRosaCreateCluster:
     async def test_given_sts_config_when_create_then_includes_sts_body(
         self, mock_mcp, mock_ocm_client, mock_context
     ):
-        """Test rosa_create_cluster with STS config."""
+        """Test rosa_create_cluster with STS config (HCP mode - default)."""
         handler = RosaClusterHandler(mock_mcp, mock_ocm_client, allow_write=True)
         await handler.rosa_create_cluster(
             mock_context,
@@ -137,20 +137,20 @@ class TestRosaCreateCluster:
             aws_account_id='123456789012',
             installer_role_arn='arn:aws:iam::123456789012:role/Installer',
             support_role_arn='arn:aws:iam::123456789012:role/Support',
-            controlplane_role_arn='arn:aws:iam::123456789012:role/ControlPlane',
             worker_role_arn='arn:aws:iam::123456789012:role/Worker',
             operator_role_prefix='my-prefix',
             oidc_config_id='oidc-123',
         )
 
         body = mock_ocm_client.create_cluster.call_args[0][0]
+        assert body['hypershift'] == {'enabled': True}
         assert body['aws']['sts']['enabled'] is True
         assert body['aws']['sts']['role_arn'] == 'arn:aws:iam::123456789012:role/Installer'
         assert body['aws']['sts']['support_role_arn'] == 'arn:aws:iam::123456789012:role/Support'
-        assert body['aws']['sts']['instance_iam_roles']['master_role_arn'] == 'arn:aws:iam::123456789012:role/ControlPlane'
         assert body['aws']['sts']['instance_iam_roles']['worker_role_arn'] == 'arn:aws:iam::123456789012:role/Worker'
         assert body['aws']['sts']['operator_role_prefix'] == 'my-prefix'
         assert body['aws']['sts']['oidc_config'] == {'id': 'oidc-123'}
+        assert body['aws']['ec2_metadata_http_tokens'] == 'required'
 
     @pytest.mark.asyncio
     async def test_given_subnet_ids_and_private_when_create_then_sets_byo_vpc(
@@ -170,8 +170,63 @@ class TestRosaCreateCluster:
 
         body = mock_ocm_client.create_cluster.call_args[0][0]
         assert body['aws']['subnet_ids'] == ['subnet-abc', 'subnet-def']
-        assert body['aws']['private_link'] is True
+        assert body['api'] == {'listening': 'internal'}
         assert body['aws']['tags'] == {'env': 'prod'}
+
+
+    @pytest.mark.asyncio
+    async def test_given_hcp_full_options_when_create_then_body_complete(
+        self, mock_mcp, mock_ocm_client, mock_context
+    ):
+        """Test rosa_create_cluster with all HCP-specific options."""
+        handler = RosaClusterHandler(mock_mcp, mock_ocm_client, allow_write=True)
+        await handler.rosa_create_cluster(
+            mock_context,
+            name='full-hcp',
+            region='sa-east-1',
+            aws_account_id='487403030403',
+            version='4.20.29',
+            channel='stable-4.20',
+            availability_zones=['sa-east-1a', 'sa-east-1b'],
+            worker_disk_size=300,
+            additional_compute_security_group_ids=['sg-123', 'sg-456'],
+            billing_account_id='223360971201',
+            kms_key_arn='arn:aws:kms:sa-east-1:487403030403:key/abc-123',
+            etcd_encryption_kms_arn='arn:aws:kms:sa-east-1:487403030403:key/etcd-456',
+            audit_log_arn='arn:aws:iam::487403030403:role/audit-role',
+            disable_workload_monitoring=True,
+        )
+
+        body = mock_ocm_client.create_cluster.call_args[0][0]
+        assert body['hypershift'] == {'enabled': True}
+        assert body['channel'] == 'stable-4.20'
+        assert body['nodes']['availability_zones'] == ['sa-east-1a', 'sa-east-1b']
+        assert body['nodes']['compute_root_volume'] == {'aws': {'size': 300}}
+        assert body['aws']['additional_compute_security_group_ids'] == ['sg-123', 'sg-456']
+        assert body['aws']['billing_account_id'] == '223360971201'
+        assert body['aws']['kms_key_arn'] == 'arn:aws:kms:sa-east-1:487403030403:key/abc-123'
+        assert body['aws']['etcd_encryption'] == {'kms_key_arn': 'arn:aws:kms:sa-east-1:487403030403:key/etcd-456'}
+        assert body['etcd_encryption'] is True
+        assert body['aws']['audit_log'] == {'role_arn': 'arn:aws:iam::487403030403:role/audit-role'}
+        assert body['disable_user_workload_monitoring'] is True
+
+    @pytest.mark.asyncio
+    async def test_given_channel_only_when_create_then_sets_channel(
+        self, mock_mcp, mock_ocm_client, mock_context
+    ):
+        """Test rosa_create_cluster with channel but no version."""
+        handler = RosaClusterHandler(mock_mcp, mock_ocm_client, allow_write=True)
+        await handler.rosa_create_cluster(
+            mock_context,
+            name='channel-cluster',
+            region='us-east-1',
+            aws_account_id='123456789012',
+            channel='eus-4.20',
+        )
+
+        body = mock_ocm_client.create_cluster.call_args[0][0]
+        assert body['channel'] == 'eus-4.20'
+        assert 'version' not in body
 
 
 class TestRosaDeleteCluster:

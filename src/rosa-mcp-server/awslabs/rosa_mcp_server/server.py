@@ -45,6 +45,7 @@ from awslabs.rosa_mcp_server.rosa_irsa_handler import RosaIRSAHandler
 from awslabs.rosa_mcp_server.rosa_machinepool_handler import RosaMachinePoolHandler
 from awslabs.rosa_mcp_server.rosa_networking_handler import RosaNetworkingHandler
 from awslabs.rosa_mcp_server.rosa_operator_handler import RosaOperatorHandler
+from awslabs.rosa_mcp_server.rosa_openshift_handler import OpenShiftHandler
 from awslabs.rosa_mcp_server.rosa_troubleshoot_handler import RosaTroubleshootHandler
 from awslabs.rosa_mcp_server.rosa_user_handler import RosaUserHandler
 from loguru import logger
@@ -219,6 +220,7 @@ def main():
         RosaIRSAHandler(mcp, ocm_client, allow_write)
         RosaConfigHandler(mcp, ocm_client, allow_write)
         K8sHandler(mcp, ocm_client, allow_write, allow_sensitive_data_access)
+        OpenShiftHandler(mcp, ocm_client, allow_write, allow_sensitive_data_access)
         RosaTroubleshootHandler(mcp, ocm_client, allow_sensitive_data_access)
 
     # Register handlers that don't need OCM (always available)

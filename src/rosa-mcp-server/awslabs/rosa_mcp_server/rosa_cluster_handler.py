@@ -90,24 +90,33 @@ class RosaClusterHandler:
         host_prefix: int = 23,
         private: bool = False,
         subnet_ids: Optional[list[str]] = None,
+        availability_zones: Optional[list[str]] = None,
         installer_role_arn: Optional[str] = None,
         support_role_arn: Optional[str] = None,
-        controlplane_role_arn: Optional[str] = None,
         worker_role_arn: Optional[str] = None,
         operator_role_prefix: Optional[str] = None,
         oidc_config_id: Optional[str] = None,
+        billing_account_id: Optional[str] = None,
+        ec2_metadata_http_tokens: str = 'required',
         etcd_encryption: bool = False,
+        etcd_encryption_kms_arn: Optional[str] = None,
+        kms_key_arn: Optional[str] = None,
         fips: bool = False,
+        disable_workload_monitoring: bool = False,
+        worker_disk_size: Optional[int] = None,
+        additional_compute_security_group_ids: Optional[list[str]] = None,
+        audit_log_arn: Optional[str] = None,
+        channel: Optional[str] = None,
         tags: Optional[dict[str, str]] = None,
     ) -> list[TextContent]:
-        """Create a new ROSA cluster via OCM API.
+        """Create a new ROSA HCP (Hosted Control Plane) cluster via OCM API.
 
         Args:
             ctx: MCP context.
             name: Cluster name (2-54 chars, lowercase alphanumeric/hyphens).
-            region: AWS region (e.g., us-east-1).
+            region: AWS region (e.g., sa-east-1).
             aws_account_id: 12-digit AWS account ID.
-            version: OpenShift version (e.g., '4.14.5'). Omit for latest.
+            version: OpenShift version (e.g., '4.20.29'). Omit for latest.
             multi_az: Deploy across multiple availability zones.
             compute_nodes: Number of worker nodes.
             compute_machine_type: EC2 instance type for workers.
@@ -116,15 +125,24 @@ class RosaClusterHandler:
             machine_cidr: CIDR for machine network.
             host_prefix: Host prefix length for pod CIDR allocation per node.
             private: Make cluster private (PrivateLink).
-            subnet_ids: Existing VPC subnet IDs for BYO VPC.
-            installer_role_arn: ARN of the ROSA installer IAM role (STS mode).
-            support_role_arn: ARN of the ROSA support IAM role (STS mode).
-            controlplane_role_arn: ARN of the control plane IAM role (STS mode).
-            worker_role_arn: ARN of the worker IAM role (STS mode).
-            operator_role_prefix: Prefix for operator IAM roles (STS mode).
+            subnet_ids: VPC subnet IDs (required for HCP BYO VPC).
+            availability_zones: Specific AZs to deploy to.
+            installer_role_arn: ARN of the HCP ROSA installer IAM role.
+            support_role_arn: ARN of the HCP ROSA support IAM role.
+            worker_role_arn: ARN of the HCP ROSA worker IAM role.
+            operator_role_prefix: Prefix for operator IAM roles.
             oidc_config_id: OIDC config ID for STS mode.
+            billing_account_id: AWS billing account ID (marketplace billing).
+            ec2_metadata_http_tokens: IMDS mode ('required' or 'optional'). Default: required.
             etcd_encryption: Enable etcd encryption.
+            etcd_encryption_kms_arn: KMS key ARN for etcd encryption.
+            kms_key_arn: KMS key ARN for EBS volume encryption.
             fips: Enable FIPS mode.
+            disable_workload_monitoring: Disable user workload monitoring.
+            worker_disk_size: Root disk size in GiB for worker nodes.
+            additional_compute_security_group_ids: Additional security group IDs for workers.
+            audit_log_arn: IAM role ARN for CloudWatch audit log forwarding.
+            channel: Version channel (e.g., 'stable-4.20', 'eus-4.20').
             tags: AWS resource tags.
         """
         if not self.allow_write:
@@ -138,9 +156,11 @@ class RosaClusterHandler:
             'cloud_provider': {'id': 'aws'},
             'region': {'id': region},
             'multi_az': multi_az,
+            'hypershift': {'enabled': True},
             'ccs': {'enabled': True},
             'aws': {
                 'account_id': aws_account_id,
+                'ec2_metadata_http_tokens': ec2_metadata_http_tokens,
             },
             'nodes': {
                 'compute': compute_nodes,
@@ -155,35 +175,75 @@ class RosaClusterHandler:
             },
             'fips': fips,
             'etcd_encryption': etcd_encryption,
+            'disable_user_workload_monitoring': disable_workload_monitoring,
         }
 
+        # Version and channel
         if version:
-            body['version'] = {'id': f'openshift-v{version}', 'channel_group': 'stable'}
+            version_body: dict = {'id': f'openshift-v{version}'}
+            if channel:
+                body['channel'] = channel
+            else:
+                version_body['channel_group'] = 'stable'
+            body['version'] = version_body
+        elif channel:
+            body['channel'] = channel
 
+        # Networking
         if subnet_ids:
             body['aws']['subnet_ids'] = subnet_ids
 
-        if private:
-            body['aws']['private_link'] = True
+        if availability_zones:
+            body['nodes']['availability_zones'] = availability_zones
 
+        if private:
+            body['api'] = {'listening': 'internal'}
+
+        # Worker config
+        if worker_disk_size:
+            body['nodes']['compute_root_volume'] = {'aws': {'size': worker_disk_size}}
+
+        if additional_compute_security_group_ids:
+            body['aws']['additional_compute_security_group_ids'] = additional_compute_security_group_ids
+
+        # Billing
+        if billing_account_id:
+            body['aws']['billing_account_id'] = billing_account_id
+
+        # Encryption
+        if kms_key_arn:
+            body['aws']['kms_key_arn'] = kms_key_arn
+
+        if etcd_encryption_kms_arn:
+            body['aws']['etcd_encryption'] = {'kms_key_arn': etcd_encryption_kms_arn}
+            body['etcd_encryption'] = True
+
+        # Audit log
+        if audit_log_arn:
+            body['aws']['audit_log'] = {'role_arn': audit_log_arn}
+
+        # Tags
         if tags:
             body['aws']['tags'] = tags
 
-        # STS configuration
+        # STS configuration (HCP)
         if installer_role_arn:
-            body['aws']['sts'] = {
+            sts_config: dict = {
                 'enabled': True,
                 'role_arn': installer_role_arn,
                 'support_role_arn': support_role_arn or '',
                 'instance_iam_roles': {
-                    'master_role_arn': controlplane_role_arn or '',
                     'worker_role_arn': worker_role_arn or '',
                 },
             }
+
             if operator_role_prefix:
-                body['aws']['sts']['operator_role_prefix'] = operator_role_prefix
+                sts_config['operator_role_prefix'] = operator_role_prefix
+
             if oidc_config_id:
-                body['aws']['sts']['oidc_config'] = {'id': oidc_config_id}
+                sts_config['oidc_config'] = {'id': oidc_config_id}
+
+            body['aws']['sts'] = sts_config
 
         data = await self.ocm.create_cluster(body)
         return [TextContent(type='text', text=json.dumps(data, indent=2))]
