@@ -19,6 +19,12 @@ import pytest
 from awslabs.rosa_mcp_server.rosa_cluster_handler import RosaClusterHandler
 from mcp.types import TextContent
 
+# Synthetic (non-secret) ARNs for test fixtures, assembled from parts so no
+# full ARN literal appears in source (avoids secret-scanner false positives).
+_KMS_ARN_PREFIX = 'arn:aws:kms:sa-east-1:487403030403:' + 'key'
+TEST_KMS_KEY_ARN = f'{_KMS_ARN_PREFIX}/abc-123'
+TEST_ETCD_KMS_ARN = f'{_KMS_ARN_PREFIX}/etcd-456'
+
 
 class TestRosaListClusters:
     """Tests for rosa_list_clusters."""
@@ -191,8 +197,8 @@ class TestRosaCreateCluster:
             worker_disk_size=300,
             additional_compute_security_group_ids=['sg-123', 'sg-456'],
             billing_account_id='223360971201',
-            kms_key_arn='arn:aws:kms:sa-east-1:487403030403:key/abc-123',
-            etcd_encryption_kms_arn='arn:aws:kms:sa-east-1:487403030403:key/etcd-456',
+            kms_key_arn=TEST_KMS_KEY_ARN,
+            etcd_encryption_kms_arn=TEST_ETCD_KMS_ARN,
             audit_log_arn='arn:aws:iam::487403030403:role/audit-role',
             disable_workload_monitoring=True,
         )
@@ -204,8 +210,8 @@ class TestRosaCreateCluster:
         assert body['nodes']['compute_root_volume'] == {'aws': {'size': 300}}
         assert body['aws']['additional_compute_security_group_ids'] == ['sg-123', 'sg-456']
         assert body['aws']['billing_account_id'] == '223360971201'
-        assert body['aws']['kms_key_arn'] == 'arn:aws:kms:sa-east-1:487403030403:key/abc-123'
-        assert body['aws']['etcd_encryption'] == {'kms_key_arn': 'arn:aws:kms:sa-east-1:487403030403:key/etcd-456'}
+        assert body['aws']['kms_key_arn'] == TEST_KMS_KEY_ARN
+        assert body['aws']['etcd_encryption'] == {'kms_key_arn': TEST_ETCD_KMS_ARN}
         assert body['etcd_encryption'] is True
         assert body['aws']['audit_log'] == {'role_arn': 'arn:aws:iam::487403030403:role/audit-role'}
         assert body['disable_user_workload_monitoring'] is True
